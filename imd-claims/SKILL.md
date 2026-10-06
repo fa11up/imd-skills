@@ -80,8 +80,8 @@ From the report's `pool` and `market` sections:
   and lists thin side pools; prefer the on-chain price from the launch pool.
 - **Exit capacity**: our sale should be small next to the launch pool's liquidity. If our allocation
   is a meaningful share of it, the realised value will be well below `ourValueUsd`.
-- **Churn**: volume far above liquidity (e.g. 20×+) means bots and volatility: claim and sell soon
-  rather than hold.
+- **Churn**: volume far above liquidity (e.g. 20×+) means bots and a volatile price; mention it,
+  since the value can move a lot before the user acts.
 - The paired asset matters: IMD-paired proceeds arrive in IMD, ETH-paired in ETH.
 
 ## 4. Recommend
@@ -99,13 +99,15 @@ The **Claim** column links each token's IdentityMD claim page, `https://explorer
 
 Verdicts, each led by its emoji. The emoji goes in the **Verdict** column only; the Contract column
 states the finding in words (e.g. "plain OZ ERC-20, exact match", "8% fee, claim + Uniswap sell exempt"):
-- ✅ **Claim and sell soon**: safe contract, liquid pool, value clearly above gas (say 5× claim gas
-  plus a sale's ~150k gas). Mention any fee path to avoid.
-- 🟡 **Claim, optional**: safe and liquid but the value is close to gas.
-- ⏸️ **Skip for now**: dead or drained pool, or value below gas. Still claimable until the sweep date,
-  so note it.
-- ⛔ **Do not claim**: the contract can freeze, tax or block the sale, or its bytecode doesn't match its
-  source.
+- ✅ **Claim**: safe contract, liquid pool, value clearly above gas (say 5× the claim gas). Mention
+  any fee path to avoid.
+- 🟡 **Optional**: safe and liquid, but the value is close to gas.
+- ⏸️ **Skip**: dead or drained pool, or value below gas. Still claimable until the sweep date, so
+  note it.
+- ⛔ **Do not claim**: the contract can freeze, tax or block the sale, or its bytecode doesn't match
+  its source.
+
+Use exactly these four labels; don't add advice about when to sell.
 
 Be concrete about why: the line of code, the on-chain read, or the swap that decided it.
 

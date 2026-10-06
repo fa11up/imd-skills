@@ -35,7 +35,7 @@ For each unclaimed mainnet allocation the skill:
 3. **reads the market**: the launch pool's live price, tick and in-range liquidity straight from the
    Uniswap v4 PoolManager (drained pools show up as zero liquidity at the min or max tick), plus
    DexScreener volume;
-4. **recommends**: ✅ claim and sell soon, 🟡 claim (optional), ⏸️ skip for now, or ⛔ do not claim,
+4. **recommends**: ✅ claim, 🟡 optional, ⏸️ skip, or ⛔ do not claim,
    with when each claim opens and a link to its claim page on explorer.imd.fun.
 
 The skill reads only public data and never touches a private key. Claiming is done by you, from the
