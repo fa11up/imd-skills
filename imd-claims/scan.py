@@ -324,7 +324,9 @@ def main():
         # a sale of our allocation pays something now.
         sold = (sq or {}).get("proceedsUsd") or 0
         traded = ((best or {}).get("volume") or {}).get("h24") or 0
-        if pool.get("atMinOrMaxTick") or (not pool.get("inRangeLiquidity") and traded and sold == 0):
+        # One-sided launch pools keep a token-only range after their IMD/ETH side is sold out, so in-range
+        # liquidity alone can't tell drained from fresh: a pool that has traded and now pays nothing is drained.
+        if pool.get("atMinOrMaxTick") or (traded and sold == 0):
             row["status"] = "drained"
         elif sold > 0:
             row["status"] = "sellable"
