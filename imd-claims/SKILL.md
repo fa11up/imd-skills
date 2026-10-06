@@ -50,8 +50,10 @@ The scanner flags; you judge. For every launch still in play:
    over the code.
 2. **Bytecode must match** (`bytecodeMatch.equal: true`). If it doesn't, or the build failed, the
    deployed contract is unverified: treat it as unsafe.
-3. **Vendored OpenZeppelin must match** a release or `master`. "DIFFERS from every checked release"
-   means someone edited library code. Diff it before trusting it.
+3. **Vendored OpenZeppelin must be genuine.** The scanner checks only the files the build compiled, and
+   accepts an exact match with a release or `master`, or a formatting-only difference (launch repos
+   often run a formatter over `lib/`). "DIFFERS from every checked release" means a real code change:
+   diff it against the version in its header before trusting it.
 4. **Run down every risk flag**. A flag is a reason to read, not a verdict:
    - fee/tax: who's exempt? Confirm on chain that our claim (distributor → us) and a pool sale
      (us → PoolManager `0x000000000004444c5dc75cB358380D2e3dE08A90`) are fee-free, e.g. via an
@@ -124,7 +126,8 @@ states the finding in words (e.g. "plain OZ ERC-20, exact match", "8% fee, claim
   a sale's ~150k gas). Mention any fee path to avoid.
 - 🟡 **Optional**: safe, but the sale quote is close to gas, or only a small part of the allocation
   can be sold.
-- ⏸️ **Skip**: sellable, but the sale quote is below the gas to claim and sell. Not shown in the table. Still claimable until the sweep date, so
+- ⏸️ **Skip**: sellable, but what's left after the gas to claim and sell is under about $0.25. Not
+  shown in the table. Still claimable until the sweep date, so
   note it.
 - ⛔ **Do not claim**: the contract can freeze, tax or block the sale, or its bytecode doesn't match
   its source.

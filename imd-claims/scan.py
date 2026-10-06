@@ -108,26 +108,50 @@ def claim_check(launch, dist):
     return out
 
 
+def _canon(b):
+    """Source with formatting removed: whitespace, and the _ separators solc allows inside hex"" literals."""
+    b = re.sub(rb'hex"([0-9a-fA-F_]*)"', lambda m: b'hex"' + m.group(1).replace(b"_", b"") + b'"', b)
+    return re.sub(rb"\s+", b"", b)
+
+
 def oz_check(repo):
-    """Each vendored OpenZeppelin file must equal the official release named in its own header."""
-    res = []
+    """Each OpenZeppelin file the build actually compiled must equal an official release (or master), or
+    differ from it only in formatting. Vendored files nothing compiles are ignored."""
+    used = set()
+    for f in (repo / "out").rglob("*.json"):
+        try:
+            md = json.loads(f.read_text()).get("metadata")
+        except Exception:
+            continue
+        if isinstance(md, str):
+            md = json.loads(md)
+        for src in (md or {}).get("sources") or {}:
+            if "openzeppelin-contracts/" in src:
+                used.add(src.split("openzeppelin-contracts/", 1)[1])
     base = repo / "lib" / "openzeppelin-contracts"
-    if not base.exists():
-        return res
-    for f in sorted(base.rglob("*.sol")):
-        rel = f.relative_to(base).as_posix()
-        m = re.search(r"\(last updated (v\d+\.\d+\.\d+)\)", f.read_text(errors="ignore")[:300])
-        tags = [m.group(1)] if m else []
-        tags += ["v5.5.0", "v5.4.0", "v5.3.0", "v5.2.0", "v5.1.0", "v5.0.2", "v5.0.0", "master"]
+    res = []
+    for rel in sorted(used):
+        f = base / rel
+        if not f.exists():
+            continue
+        local = f.read_bytes()
+        m = re.search(rb"\(last updated (v\d+\.\d+\.\d+)\)", local[:300])
+        tags = ([m.group(1).decode()] if m else []) + ["v5.5.0", "v5.4.0", "v5.3.0", "v5.2.0", "v5.1.0", "v5.0.2", "v5.0.0", "master"]
         verdict = "DIFFERS from every checked release"
+        fmt_match = None
         for t in dict.fromkeys(tags):
             try:
                 body = urllib.request.urlopen(f"https://raw.githubusercontent.com/OpenZeppelin/openzeppelin-contracts/{t}/{rel}", timeout=20).read()
             except Exception:
                 continue
-            if body == f.read_bytes():
+            if body == local:
                 verdict = f"identical to {t}" + (" (unreleased development branch, genuine OZ code)" if t == "master" else "")
                 break
+            if fmt_match is None and _canon(body) == _canon(local):
+                fmt_match = t
+        else:
+            if fmt_match:
+                verdict = f"identical to {fmt_match} apart from formatting"
         res.append({"file": rel, "verdict": verdict})
     return res
 
@@ -343,9 +367,9 @@ def main():
         print(f"   status: {row['status'].upper()}")
         print(f"   claim: {amt:,.0f} {sym} | {when} | claim by {time.strftime('%Y-%m-%d', time.gmtime(sw)) if sw else '?'} | root ok {c.get('rootVerified')} | claimed {c.get('claimed')} | {c.get('simulation')} | gas ~${m['claimGasUsd']:.2f}")
         print(f"   contract: {k.get('sourceLines')} lines, bytecode match {bm.get('equal')} ({bm.get('immutablesMasked', 0)} immutables masked), flags {list((k.get('riskFlags') or {}).keys()) or 'none'}")
-        oz = [o for o in k.get("openzeppelin") or [] if not o["verdict"].startswith("identical")]
+        oz = [o for o in k.get("openzeppelin") or [] if o["verdict"].startswith("DIFFERS")]
         if k.get("openzeppelin"):
-            print(f"   openzeppelin: {len(k['openzeppelin'])} files, {'ALL identical to an official release' if not oz else str(len(oz)) + ' DIFFER'}")
+            print(f"   openzeppelin: {len(k['openzeppelin'])} compiled files, {'all genuine (official release or formatting-only)' if not oz else str(len(oz)) + ' DIFFER: ' + ', '.join(o['file'] for o in oz)}")
         print(f"   pool: vs {pool.get('pairedWith')} hook perms {pool.get('hookPermissions')} tick {pool.get('tick')} in-range liquidity {pool.get('inRangeLiquidity')}{' AT MIN/MAX TICK' if pool.get('atMinOrMaxTick') else ''}")
         d = m["dexscreener"] or {}
         pv = m["priceUsdOnchain"]
