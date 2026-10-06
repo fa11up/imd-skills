@@ -40,7 +40,7 @@ CHAINS = {
         "quoter": "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203",
         "factory": "0xff03410d0fe5fa8f7f59f743de35e333d9857120",
         "guardHook": "0x784ff9a3ac5d88a30bfff6f7f2a270161fbe6000",
-        "imd": MAINNET_IMD, "explorer": "https://etherscan.io",
+        "imd": MAINNET_IMD, "explorer": "https://etherscan.io", "blockscout": "https://eth.blockscout.com",
     },
     4663: {
         "name": "Robinhood Chain", "slug": "robinhood", "rpc": "https://rpc.mainnet.chain.robinhood.com",
@@ -49,6 +49,7 @@ CHAINS = {
         "factory": "0x9c9d2fcb75c2c132c0ac0c42df3819a42347265e",
         "guardHook": "0x19bec7c2e1b2aadaf67b259744751a9960d66000",
         "imd": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127", "explorer": "https://robin.etherscan.io",
+        "blockscout": "https://robinhoodchain.blockscout.com",  # Cloudflare-protected; other pools may not resolve here
     },
 }
 TESTNETS = {11155111}
@@ -279,6 +280,48 @@ def sell_quote(ch, pool, token_addr, amount_raw):
     return {"fillable": best[0], "fillPct": 100.0 * best[0] / amount_raw if amount_raw else 0.0, "proceeds": best[1]}
 
 
+INITIALIZE_TOPIC = "0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438"
+
+
+def pool_key_from_log(ch, pool_id):
+    """A v4 pool's key (currencies, fee, tick spacing, hook) from its Initialize event, via Blockscout's
+    logs API (indexed by poolId, so no block range is needed). None if it can't be read."""
+    url = (f"{ch['blockscout']}/api?module=logs&action=getLogs&fromBlock=0&toBlock=latest&address={ch['poolManager']}"
+           f"&topic0={INITIALIZE_TOPIC}&topic1={pool_id}&topic0_1_opr=and")
+    r = None
+    for i in range(4):  # Blockscout rate-limits bursts with a non-list "result"
+        try:
+            r = get(url).get("result")
+        except Exception:
+            r = None
+        if isinstance(r, list):
+            break
+        time.sleep(2 * (i + 1))
+    if not isinstance(r, list) or not r:
+        return None
+    l = r[0]
+    w = [l["data"][2 + i:2 + i + 64] for i in range(0, len(l["data"]) - 2, 64)]
+    return {"currency0": "0x" + l["topics"][2][-40:], "currency1": "0x" + l["topics"][3][-40:],
+            "fee": int(w[0], 16), "tickSpacing": int(w[1], 16) - (1 << 256 if int(w[1], 16) >= 1 << 255 else 0),
+            "hook": "0x" + w[2][-40:]}
+
+
+STABLES = {"USDC", "USDT", "DAI", "USDS", "USDE", "PYUSD", "FRAX", "LUSD", "USD0", "RLUSD"}
+
+
+def paired_decimals(ch, addr, cache):
+    addr = addr.lower()
+    if addr == NATIVE:
+        return 18
+    key = ("dec", ch["slug"], addr)
+    if key not in cache:
+        try:
+            cache[key] = int(cast("call", "--rpc-url", ch["rpc"], addr, "decimals()(uint8)").split()[0])
+        except Exception:
+            cache[key] = 18
+    return cache[key]
+
+
 def paired_usd(ch, addr, eth_usd, cache):
     """USD per whole paired token: ETH from Chainlink; any ERC-20 from its own deepest DexScreener pool on
     that chain; a chain's bridged IMD falls back to mainnet IMD if it has no pool of its own."""
@@ -292,6 +335,10 @@ def paired_usd(ch, addr, eth_usd, cache):
         best = max(mine, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, default=None)
         if best:
             cache[key] = (float(best["priceUsd"]), f"{best['baseToken']['symbol']} (DexScreener, {ch['name']})")
+        elif any(p_["quoteToken"]["address"].lower() == addr and p_["quoteToken"]["symbol"].upper() in STABLES for p_ in pairs) or \
+                (lambda sym: sym.upper() in STABLES)(next((p_["quoteToken"]["symbol"] for p_ in pairs if p_["quoteToken"]["address"].lower() == addr), "")):
+            sym_ = next(p_["quoteToken"]["symbol"] for p_ in pairs if p_["quoteToken"]["address"].lower() == addr)
+            cache[key] = (1.0, f"{sym_} (dollar stablecoin, taken as $1)")
         elif addr == ch["imd"] and addr != MAINNET_IMD:
             usd, _ = paired_usd(CHAINS[1], MAINNET_IMD, eth_usd, cache)
             cache[key] = (usd, "IMD (no local pool: priced at mainnet IMD, an assumption)")
@@ -412,7 +459,7 @@ def main():
         best = own or max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, default=None)
         pool = row.get("pool") or {}
         unit, unit_src = paired_usd(ch, pool.get("_other") or NATIVE, eth_usd, price_cache) if pool.get("_other") is not None else (None, "unpriced")
-        decimals_paired = 18  # ETH, IMD and FWA all use 18; a launch pairing with another token would need its decimals
+        decimals_paired = paired_decimals(ch, pool.get("_other") or NATIVE, price_cache)
         price_onchain = pool.get("pairedPerToken", 0) * unit if unit else None
         amt = int(x["amount"]) / 10 ** x["token"]["decimals"]
         sq = None
@@ -423,7 +470,41 @@ def main():
                 sq["proceedsUsd"] = sq["proceedsPaired"] * unit
             except Exception as ex:
                 sq = {"error": str(ex)}
+        # Other Uniswap v4 pools of the token on this chain (people open their own after a launch pool
+        # drains): resolve each key from its Initialize log and quote our whole allocation there too.
+        others = []
+        launch_pid = (pool.get("poolId") or "").lower()
+        for p in pairs:
+            if "v4" not in (p.get("labels") or []) or p["pairAddress"].lower() == launch_pid:
+                continue
+            key = pool_key_from_log(ch, p["pairAddress"])
+            if not key:
+                others.append({"poolId": p["pairAddress"], "error": "pool key not resolvable"})
+                continue
+            other_cur = key["currency1"] if key["currency0"].lower() == tok else key["currency0"]
+            o_unit, o_src = paired_usd(ch, other_cur, eth_usd, price_cache)
+            alt = {"_other": other_cur.lower(), "fee": key["fee"], "tickSpacing": key["tickSpacing"], "hook": key["hook"]}
+            entry = {"poolId": p["pairAddress"], "pairedWith": p["quoteToken"]["symbol"], "fee": key["fee"],
+                     "tickSpacing": key["tickSpacing"], "hook": key["hook"],
+                     "hookPermissions": [n_ for b_, n_ in HOOK_FLAGS if (int(key["hook"], 16) & 0x3FFF) >> b_ & 1]}
+            if o_unit:
+                try:
+                    q_ = sell_quote(ch, alt, tok, int(x["amount"]))
+                    q_["proceedsPaired"] = q_["proceeds"] / 10 ** paired_decimals(ch, other_cur, price_cache)
+                    q_["proceedsUsd"] = q_["proceedsPaired"] * o_unit
+                    entry["sellQuote"] = q_
+                except Exception as ex:
+                    entry["error"] = str(ex)[-160:]
+            others.append(entry)
+        best_other = max((o for o in others if (o.get("sellQuote") or {}).get("proceedsUsd")),
+                         key=lambda o: o["sellQuote"]["proceedsUsd"], default=None)
+        if best_other and best_other["sellQuote"]["proceedsUsd"] > ((sq or {}).get("proceedsUsd") or 0):
+            best_route = {"pool": "other", **best_other}
+        else:
+            best_route = {"pool": "launch", "poolId": pool.get("poolId"), "sellQuote": sq}
         row["market"] = {
+            "otherPools": others,
+            "bestRoute": best_route,
             "pairedPriceSource": unit_src,
             "priceUsdOnchain": price_onchain,
             "marketCapUsd": price_onchain * 1e9 if price_onchain else None,
@@ -436,7 +517,8 @@ def main():
             "priceTimesAmountUsd": amt * price_onchain if price_onchain else None,
             "sellQuote": sq,
             # what a sale of our whole allocation would actually pay now (the part the pool can absorb)
-            "ourValueUsd": (sq or {}).get("proceedsUsd") if sq and "error" not in sq else None,
+            # the best single pool to sell our whole allocation into right now
+            "ourValueUsd": ((best_route.get("sellQuote") or {}).get("proceedsUsd")),
             # L2s (Robinhood Chain is an Arbitrum chain) also charge for L1 data, which this omits.
             "claimGasUsd": (row["claim"].get("gas", 120000) * gas_price[x["chainId"]] / 1e18 * eth_usd),
         }
@@ -444,7 +526,7 @@ def main():
         # pinned at a tick bound, or nothing in range after trading), so a sale pays nothing. Waiting:
         # a fresh launch nobody has bought into yet; it could still become worth something. Sellable:
         # a sale of our allocation pays something now.
-        sold = (sq or {}).get("proceedsUsd") or 0
+        sold = row["market"]["ourValueUsd"] or 0
         traded = ((best or {}).get("volume") or {}).get("h24") or 0
         # One-sided launch pools keep a token-only range after their IMD/ETH side is sold out, so in-range
         # liquidity alone can't tell drained from fresh: a pool that has traded and now pays nothing is drained.
@@ -478,6 +560,13 @@ def main():
             print(f"   SALE QUOTE: selling all {amt:,.0f} pays {sq['proceedsPaired']:.6f} {pool.get('pairedWith')} (~${sq['proceedsUsd']:,.2f}, {unit_src}); pool absorbs {sq['fillPct']:.1f}% of our allocation")
         elif sq:
             print(f"   sale quote failed: {sq['error'][-120:]}")
+        for o in others:
+            oq = o.get("sellQuote") or {}
+            hk = "no hook" if int(o.get("hook", "0x0"), 16) == 0 else f"hook {o.get('hook')} {o.get('hookPermissions')}"
+            print(f"   OTHER POOL {o['poolId'][:12]}… vs {o.get('pairedWith')} fee {o.get('fee')} {hk}: " +
+                  (f"pays ~${oq.get('proceedsUsd', 0):,.2f} ({oq.get('fillPct', 0):.1f}% fill)" if oq else o.get("error", "unpriced")))
+        if best_route.get("pool") == "other":
+            print(f"   BEST ROUTE: the other pool {best_route['poolId'][:12]}… (~${row['market']['ourValueUsd']:,.2f})")
 
     REPORTS = Path(a.out)
     by = {k: [f"#{r['launch']} {r['symbol']}" + ("" if r["chainId"] == 1 else f" ({r['chain']})") for r in rows if r.get("status") == k]

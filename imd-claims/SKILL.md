@@ -101,6 +101,12 @@ of dollars. Judge by what a sale actually pays:
   allocation into the launch pool pays. If the pool can't fill all of it, it finds the largest amount
   that fills (`fillPct`) and what that pays (`proceedsUsd`). `ourValueUsd` is that figure. Treat
   `priceTimesAmountUsd` as a ceiling only, never as value.
+- **Every pool counts, not just the launch pool.** After a launch pool drains, people often open their
+  own pools for the token. The scanner finds the token's other Uniswap v4 pools on that chain (DexScreener),
+  resolves each pool key from its `Initialize` log, quotes our whole allocation there too
+  (`market.otherPools`), and values the allocation at the single best pool (`market.bestRoute`). If the
+  best route isn't the launch pool, say which pool to sell into, and treat a non-zero hook on that pool
+  like any custom hook (read it). v2/v3 pools aren't quoted.
 - **`fillPct` below 100** means the pool runs out of IMD/ETH before our allocation is sold. Say so in
   the table: the rest is unsellable until buyers add more.
 - **`inRangeLiquidity: 0` or `atMinOrMaxTick: true`** means nothing to sell into at all. A token at
@@ -134,7 +140,7 @@ If nothing is sellable, say so in one line, plus the waiting line.
 
 Give the user one table of the sellable allocations, then a verdict per token:
 
-| Token | Launch | Chain | Contract | Pool | Sale quote (fill %) | Claim gas | Claimable | Verdict | Claim |
+| Token | Launch | Chain | Contract | Pool | Best sale quote (fill %) | Claim gas | Claimable | Verdict | Claim |
 
 The **Chain** column is Ethereum or Robinhood Chain. Claim gas on Robinhood Chain excludes the L1 data
 fee Arbitrum chains add; it's still cents.
