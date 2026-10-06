@@ -24,7 +24,7 @@
 <body>
 <main>
   <h1>Claim launch rewards</h1>
-  <p class="sub">Seat wallet <span id="want"></span> · Ethereum mainnet. Each claim is re-simulated before your wallet is asked to sign.</p>
+  <p class="sub">Seat wallet <span id="want"></span>. Each claim switches your wallet to its chain (Ethereum or Robinhood Chain) and is re-simulated before your wallet is asked to sign.</p>
   <div id="top"><button id="connect">Connect wallet</button> <span id="acct" class="meta"></span></div>
   <div id="list"></div>
 </main>
@@ -34,9 +34,22 @@ let account = null, claims = [];
 const eth = window.ethereum;
 const fmt = (wei) => (Number(BigInt(wei) / 10n ** 14n) / 1e4).toLocaleString(undefined, { maximumFractionDigits: 2 });
 
-async function ensureMainnet() {
-  const id = await eth.request({ method: "eth_chainId" });
-  if (id !== "0x1") await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] });
+// Chains a claim can be on. Robinhood Chain is added to the wallet if it doesn't know it yet.
+const CHAINS = {
+  1: { name: "Ethereum", explorer: "https://etherscan.io" },
+  4663: { name: "Robinhood Chain", explorer: "https://robin.etherscan.io",
+          add: { chainId: "0x1237", chainName: "Robinhood Chain", nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+                 rpcUrls: ["https://rpc.mainnet.chain.robinhood.com"], blockExplorerUrls: ["https://robin.etherscan.io"] } },
+};
+async function ensureChain(chainId) {
+  const want = "0x" + chainId.toString(16);
+  if ((await eth.request({ method: "eth_chainId" })) === want) return;
+  try {
+    await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: want }] });
+  } catch (e) {
+    if (e && e.code === 4902 && CHAINS[chainId]?.add) await eth.request({ method: "wallet_addEthereumChain", params: [CHAINS[chainId].add] });
+    else throw e;
+  }
 }
 
 function render() {
@@ -46,7 +59,7 @@ function render() {
     const unlocked = Date.now() / 1000 >= c.unlocksAt;
     const el = document.createElement("div");
     el.className = "card";
-    el.innerHTML = `<div class="row"><div><div class="sym">${c.symbol} <span class="meta">launch #${c.launch}</span></div>
+    el.innerHTML = `<div class="row"><div><div class="sym">${c.symbol} <span class="meta">launch #${c.launch} · ${(CHAINS[c.chainId || 1] || {}).name || "chain " + c.chainId}</span></div>
       <div>${fmt(c.amount)} ${c.symbol}</div>
       <div class="meta"><a href="https://explorer.imd.fun/token/${c.token}" target="_blank" rel="noreferrer">claim page on explorer.imd.fun ↗</a><br>distributor ${c.to}<br>token ${c.token}<br>proof verified against the on-chain root: ${c.rootVerified ? "yes" : "NO"}</div></div>
       <button ${!account || !c.rootVerified || !unlocked ? "disabled" : ""}>${unlocked ? "Claim" : "Unlocks " + new Date(c.unlocksAt * 1000).toUTCString().slice(17, 25) + "Z"}</button></div>
@@ -55,13 +68,13 @@ function render() {
     btn.onclick = async () => {
       btn.disabled = true;
       try {
-        await ensureMainnet();
+        await ensureChain(c.chainId || 1);
         st.className = "status meta"; st.textContent = "Simulating…";
         await eth.request({ method: "eth_call", params: [{ from: account, to: c.to, data: c.data }, "latest"] });
         st.textContent = "Simulation passed. Confirm in your wallet…";
         const hash = await eth.request({ method: "eth_sendTransaction", params: [{ from: account, to: c.to, data: c.data }] });
         st.className = "status ok";
-        st.innerHTML = `Sent: <a href="https://etherscan.io/tx/${hash}" target="_blank" rel="noreferrer">${hash}</a>`;
+        st.innerHTML = `Sent: <a href="${(CHAINS[c.chainId || 1] || CHAINS[1]).explorer}/tx/${hash}" target="_blank" rel="noreferrer">${hash}</a>`;
       } catch (e) {
         st.className = "status bad";
         st.textContent = (e && (e.message || e.data?.message)) || String(e);
@@ -78,7 +91,7 @@ document.getElementById("connect").onclick = async () => {
   account = a.toLowerCase();
   const note = document.getElementById("acct");
   if (account !== WANT) { note.className = "meta bad"; note.textContent = `Connected ${a}, but these claims pay ${WANT}. Switch accounts.`; account = null; }
-  else { note.className = "meta ok"; note.textContent = `Connected ${a}`; await ensureMainnet(); }
+  else { note.className = "meta ok"; note.textContent = `Connected ${a}`; }
   render();
 };
 

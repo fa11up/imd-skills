@@ -5,7 +5,8 @@ source says, and is there a market to sell into.
     python3 scan.py --wallet 0xYourSeatWallet [--all] [--launch N ...] [--out DIR] [--workdir DIR]
     (or set IMD_WALLET instead of --wallet)
 
-For every MAINNET allocation not yet claimed (Sepolia tokens have no value and are only counted):
+For every allocation not yet claimed on a supported value chain (Ethereum, Robinhood Chain; Sepolia
+tokens have no value and are only counted):
   1. claim     our leaf from api.imd.fun, proof recomputed against the distributor's on-chain root,
                claimed? unlocked? eth_call of claim() from our wallet, and its gas cost now
   2. contract  clones the launch's sourceRepoUrl at sourceCommit, compiles with forge, compares the
@@ -24,12 +25,33 @@ from pathlib import Path
 
 os.environ["FOUNDRY_DISABLE_NIGHTLY_WARNING"] = "1"
 API = "https://api.imd.fun"
-RPC = "https://ethereum-rpc.publicnode.com"
 WALLET = None  # the seat owner's wallet, from --wallet or IMD_WALLET
-IMD = "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7"
-POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
-CHAINLINK_ETH_USD = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
-V4_QUOTER = "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"  # Uniswap v4 Quoter, mainnet
+NATIVE = "0x0000000000000000000000000000000000000000"
+CHAINLINK_ETH_USD = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"  # mainnet; ETH is priced once for every chain
+MAINNET_IMD = "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7"
+
+# Chains IdentityMD launches on with real value. Addresses from the plane's deployment records
+# (Identity-md/protocol packages/contracts/deployments/*.json) and its explorer's Uniswap table
+# (apps/explorer/lib/uniswap.ts). Add a chain here when the plane opens launches on it.
+CHAINS = {
+    1: {
+        "name": "Ethereum", "slug": "ethereum", "rpc": "https://ethereum-rpc.publicnode.com",
+        "poolManager": "0x000000000004444c5dc75cB358380D2e3dE08A90",
+        "quoter": "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203",
+        "factory": "0xff03410d0fe5fa8f7f59f743de35e333d9857120",
+        "guardHook": "0x784ff9a3ac5d88a30bfff6f7f2a270161fbe6000",
+        "imd": MAINNET_IMD, "explorer": "https://etherscan.io",
+    },
+    4663: {
+        "name": "Robinhood Chain", "slug": "robinhood", "rpc": "https://rpc.mainnet.chain.robinhood.com",
+        "poolManager": "0x8366a39cc670b4001a1121b8f6a443a643e40951",
+        "quoter": "0x8dc178efb8111bb0973dd9d722ebeff267c98f94",
+        "factory": "0x9c9d2fcb75c2c132c0ac0c42df3819a42347265e",
+        "guardHook": "0x19bec7c2e1b2aadaf67b259744751a9960d66000",
+        "imd": "0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127", "explorer": "https://robin.etherscan.io",
+    },
+}
+TESTNETS = {11155111}
 
 # v4 hook permission bits (lowest 14 bits of the hook address)
 HOOK_FLAGS = [(13, "beforeInitialize"), (12, "afterInitialize"), (11, "beforeAddLiquidity"), (10, "afterAddLiquidity"),
@@ -75,7 +97,8 @@ def leaf_root(amount, proof):
     return h.lower()
 
 
-def claim_check(launch, dist):
+def claim_check(ch, launch, dist):
+    RPC = ch["rpc"]
     leaves = launch["claims"]["leaves"]
     leaf = next((l for l in leaves if l["wallet"].lower() == WALLET), None)
     if not leaf:
@@ -156,7 +179,8 @@ def oz_check(repo):
     return res
 
 
-def contract_check(launch, token_addr, token_name, workdir):
+def contract_check(ch, launch, token_addr, token_name, workdir):
+    RPC = ch["rpc"]
     repo = workdir / f"launch-{launch['launchNumber']}"
     if not repo.exists():
         subprocess.run(["git", "clone", "-q", launch["sourceRepoUrl"], str(repo)], check=True)
@@ -195,10 +219,11 @@ def contract_check(launch, token_addr, token_name, workdir):
             "openzeppelin": oz_check(repo)}
 
 
-def pool_check(launch, token_addr, hook):
+def pool_check(ch, launch, token_addr, hook):
     """The launch's own v4 pool: key rebuilt from launch.json (paired currency, tick spacing) and the
     launch record (fee, hook), then slot0 and in-range liquidity read straight from the PoolManager."""
-    other = ((launch.get("_spec_pool") or {}).get("pairedCurrency") or IMD).lower()  # 0x0 = native ETH
+    RPC, POOL_MANAGER = ch["rpc"], ch["poolManager"]
+    other = ((launch.get("_spec_pool") or {}).get("pairedCurrency") or ch["imd"]).lower()  # 0x0 = native ETH
     c0, c1 = sorted([token_addr.lower(), other])
     tick_spacing = int((launch.get("_spec_pool") or {}).get("tickSpacing") or 60)
     fee = int(launch.get("poolFee") or 12500)
@@ -213,13 +238,13 @@ def pool_check(launch, token_addr, hook):
     other_per_token = (p01 if token_addr.lower() == c0 else (1 / p01 if p01 else 0.0))
     hook_bits = int(hook, 16) & 0x3FFF
     perms = [name for bit, name in HOOK_FLAGS if hook_bits >> bit & 1]
-    return {"poolId": pid, "_other": other, "pairedWith": "ETH" if other.endswith("0" * 40) else ("IMD" if other == IMD else other),
+    return {"poolId": pid, "_other": other, "pairedWith": "ETH" if other == NATIVE else ("IMD" if other == ch["imd"] else other),
             "fee": fee, "tickSpacing": tick_spacing, "hook": hook, "hookPermissions": perms,
             "initialized": sqrtp != 0, "tick": tick, "atMinOrMaxTick": abs(tick) >= 887200,
             "inRangeLiquidity": liq, "pairedPerToken": other_per_token}
 
 
-def sell_quote(pool, token_addr, amount_raw):
+def sell_quote(ch, pool, token_addr, amount_raw):
     """What selling `amount_raw` of the token into the launch pool actually pays, from Uniswap's v4 Quoter.
 
     Launch pools are seeded one-sided with the new token, so the only IMD/ETH inside is what buyers have
@@ -231,7 +256,7 @@ def sell_quote(pool, token_addr, amount_raw):
 
     def q(raw):
         try:
-            out = cast("call", "--rpc-url", RPC, V4_QUOTER,
+            out = cast("call", "--rpc-url", ch["rpc"], ch["quoter"],
                        "quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))(uint256,uint256)",
                        key.format(raw))
             return int(out.split()[0])
@@ -254,6 +279,27 @@ def sell_quote(pool, token_addr, amount_raw):
     return {"fillable": best[0], "fillPct": 100.0 * best[0] / amount_raw if amount_raw else 0.0, "proceeds": best[1]}
 
 
+def paired_usd(ch, addr, eth_usd, cache):
+    """USD per whole paired token: ETH from Chainlink; any ERC-20 from its own deepest DexScreener pool on
+    that chain; a chain's bridged IMD falls back to mainnet IMD if it has no pool of its own."""
+    addr = addr.lower()
+    if addr == NATIVE:
+        return eth_usd, "ETH (Chainlink)"
+    key = (ch["slug"], addr)
+    if key not in cache:
+        pairs = get(f"https://api.dexscreener.com/latest/dex/tokens/{addr}").get("pairs") or []
+        mine = [p for p in pairs if p["baseToken"]["address"].lower() == addr and p.get("chainId") == ch["slug"] and p.get("priceUsd")]
+        best = max(mine, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, default=None)
+        if best:
+            cache[key] = (float(best["priceUsd"]), f"{best['baseToken']['symbol']} (DexScreener, {ch['name']})")
+        elif addr == ch["imd"] and addr != MAINNET_IMD:
+            usd, _ = paired_usd(CHAINS[1], MAINNET_IMD, eth_usd, cache)
+            cache[key] = (usd, "IMD (no local pool: priced at mainnet IMD, an assumption)")
+        else:
+            cache[key] = (None, "unpriced")
+    return cache[key]
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true", help="include already-claimed allocations")
@@ -270,64 +316,74 @@ def main():
     workdir.mkdir(parents=True, exist_ok=True)
 
     earnings = get(f"{API}/wallets/{WALLET}/earnings?limit=200")["earnings"]
-    mainnet = [x for x in earnings if x["chainId"] == 1]
-    print(f"{len(earnings)} allocations: {len(mainnet)} mainnet, {len(earnings) - len(mainnet)} testnet (no value, skipped)")
+    valued = [x for x in earnings if x["chainId"] in CHAINS]
+    unknown = sorted({x["chainId"] for x in earnings if x["chainId"] not in CHAINS and x["chainId"] not in TESTNETS})
+    per = ", ".join(f"{sum(1 for x in valued if x['chainId'] == c)} {CHAINS[c]['name']}" for c in CHAINS)
+    print(f"{len(earnings)} allocations: {per}, {sum(1 for x in earnings if x['chainId'] in TESTNETS)} testnet (no value, skipped)")
+    if unknown:
+        print(f"WARNING: allocations on chains this scanner doesn't know yet: {unknown}. Add them to CHAINS.")
     if a.launch:
-        mainnet = [x for x in mainnet if x["launchNumber"] in a.launch]
+        valued = [x for x in valued if x["launchNumber"] in a.launch]
 
-    eth_usd = int(cast("call", "--rpc-url", RPC, CHAINLINK_ETH_USD, "latestAnswer()(int256)").split()[0]) / 1e8
-    gas_price = int(cast("gas-price", "--rpc-url", RPC))
-    imd_pairs = get(f"https://api.dexscreener.com/latest/dex/tokens/{IMD}").get("pairs") or []
-    imd_main = max((p for p in imd_pairs if p["baseToken"]["address"].lower() == IMD), key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, default=None)
-    imd_usd = float(imd_main["priceUsd"]) if imd_main else None
-    ds = get("https://api.dexscreener.com/latest/dex/tokens/" + ",".join(x["token"]["address"] for x in mainnet)).get("pairs") or [] if mainnet else []
+    eth_usd = int(cast("call", "--rpc-url", CHAINS[1]["rpc"], CHAINLINK_ETH_USD, "latestAnswer()(int256)").split()[0]) / 1e8
+    gas_price = {c: int(cast("gas-price", "--rpc-url", CHAINS[c]["rpc"])) for c in {x["chainId"] for x in valued} | {1}}
+    price_cache = {}
+    imd_usd, _ = paired_usd(CHAINS[1], MAINNET_IMD, eth_usd, price_cache)
+    ds = []
+    addrs = [x["token"]["address"] for x in valued]
+    for i in range(0, len(addrs), 30):  # DexScreener takes up to 30 addresses per call
+        ds += get("https://api.dexscreener.com/latest/dex/tokens/" + ",".join(addrs[i:i + 30])).get("pairs") or []
 
     rows = []
-    for x in mainnet:
+    for x in valued:
         n, sym, tok = x["launchNumber"], x["token"]["symbol"], x["token"]["address"].lower()
-        print(f"\n== #{n} {sym} ({x['token']['name']}) {tok}\n   claim page: https://explorer.imd.fun/token/{tok}", flush=True)
+        ch = CHAINS[x["chainId"]]
+        print(f"\n== #{n} {sym} ({x['token']['name']}) {tok} [{ch['name']}]\n   claim page: https://explorer.imd.fun/token/{tok}", flush=True)
         L = get(f"{API}/launches/{x['launchId']}?claims=1")
         arts = {a_["name"]: a_["address"].lower() for a_ in L["artifacts"]}
         dist = arts.get("MerkleDistributor")
         hook = arts.get("PoolInitializationGuard")
         token_name = next((k for k, v in arts.items() if v == tok), None)
         row = {"launch": n, "symbol": sym, "name": x["token"]["name"], "token": tok, "launchId": x["launchId"],
+               "chainId": x["chainId"], "chain": ch["name"], "explorer": f"{ch['explorer']}/token/{tok}",
                "claimPage": f"https://explorer.imd.fun/token/{tok}",
                "requester": L.get("requester"), "economics": L.get("economics"), "artifacts": arts,
                "sourceRepoUrl": L.get("sourceRepoUrl"), "sourceCommit": L.get("sourceCommit")}
         try:
-            row["claim"] = claim_check(L, dist)
+            row["claim"] = claim_check(ch, L, dist)
         except Exception as ex:
             row["claim"] = {"error": str(ex)}
         if row["claim"].get("claimed") and not a.all:
             print("   already claimed, skipping")
             continue
         try:
-            row["contract"] = contract_check(L, tok, token_name, workdir)
+            row["contract"] = contract_check(ch, L, tok, token_name, workdir)
             L["_spec_pool"] = (row["contract"]["spec"] or {}).get("pool") or {}
         except Exception as ex:
             row["contract"] = {"error": str(ex)}
         try:
-            row["pool"] = pool_check(L, tok, hook)
+            row["pool"] = pool_check(ch, L, tok, hook or ch["guardHook"])
         except Exception as ex:
             row["pool"] = {"error": str(ex)}
         # DexScreener: the launch pool if listed, else the deepest pool for the token
-        pairs = [p for p in ds if p["baseToken"]["address"].lower() == tok]
+        pairs = [p for p in ds if p["baseToken"]["address"].lower() == tok and p.get("chainId") == ch["slug"]]
         own = next((p for p in pairs if p["pairAddress"].lower() == (row.get("pool") or {}).get("poolId", "").lower()), None)
         best = own or max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0, default=None)
         pool = row.get("pool") or {}
-        unit = imd_usd if pool.get("pairedWith") == "IMD" else (eth_usd if pool.get("pairedWith") == "ETH" else None)
+        unit, unit_src = paired_usd(ch, pool.get("_other") or NATIVE, eth_usd, price_cache) if pool.get("_other") is not None else (None, "unpriced")
+        decimals_paired = 18  # ETH, IMD and FWA all use 18; a launch pairing with another token would need its decimals
         price_onchain = pool.get("pairedPerToken", 0) * unit if unit else None
         amt = int(x["amount"]) / 10 ** x["token"]["decimals"]
         sq = None
         if pool.get("initialized") and unit and not row["claim"].get("error"):
             try:
-                sq = sell_quote(pool, tok, int(x["amount"]))
-                sq["proceedsPaired"] = sq["proceeds"] / 1e18
+                sq = sell_quote(ch, pool, tok, int(x["amount"]))
+                sq["proceedsPaired"] = sq["proceeds"] / 10 ** decimals_paired
                 sq["proceedsUsd"] = sq["proceedsPaired"] * unit
             except Exception as ex:
                 sq = {"error": str(ex)}
         row["market"] = {
+            "pairedPriceSource": unit_src,
             "priceUsdOnchain": price_onchain,
             "marketCapUsd": price_onchain * 1e9 if price_onchain else None,
             "dexscreener": None if not best else {
@@ -340,7 +396,8 @@ def main():
             "sellQuote": sq,
             # what a sale of our whole allocation would actually pay now (the part the pool can absorb)
             "ourValueUsd": (sq or {}).get("proceedsUsd") if sq and "error" not in sq else None,
-            "claimGasUsd": (row["claim"].get("gas", 120000) * gas_price / 1e18 * eth_usd),
+            # L2s (Robinhood Chain is an Arbitrum chain) also charge for L1 data, which this omits.
+            "claimGasUsd": (row["claim"].get("gas", 120000) * gas_price[x["chainId"]] / 1e18 * eth_usd),
         }
         # What the user should care about. Drained: the paired side was sold out of the pool (price
         # pinned at a tick bound, or nothing in range after trading), so a sale pays nothing. Waiting:
@@ -375,21 +432,24 @@ def main():
         pv = m["priceUsdOnchain"]
         print(f"   market: price ${pv if pv is None else f'{pv:.10f}'} mcap ${(m['marketCapUsd'] or 0):,.0f} | ds liq ${d.get('liquidityUsd') or 0:,.0f} vol24 ${d.get('volume24h') or 0:,.0f} | price x ours ${(m['priceTimesAmountUsd'] or 0):,.2f}")
         if sq and "error" not in sq:
-            print(f"   SALE QUOTE: selling all {amt:,.0f} pays {sq['proceedsPaired']:.6f} {pool.get('pairedWith')} (~${sq['proceedsUsd']:,.2f}); pool absorbs {sq['fillPct']:.1f}% of our allocation")
+            print(f"   SALE QUOTE: selling all {amt:,.0f} pays {sq['proceedsPaired']:.6f} {pool.get('pairedWith')} (~${sq['proceedsUsd']:,.2f}, {unit_src}); pool absorbs {sq['fillPct']:.1f}% of our allocation")
         elif sq:
             print(f"   sale quote failed: {sq['error'][-120:]}")
 
     REPORTS = Path(a.out)
-    by = {k: [f"#{r['launch']} {r['symbol']}" for r in rows if r.get("status") == k] for k in ("sellable", "waiting", "drained")}
+    by = {k: [f"#{r['launch']} {r['symbol']}" + ("" if r["chainId"] == 1 else f" ({r['chain']})") for r in rows if r.get("status") == k]
+          for k in ("sellable", "waiting", "drained")}
     print(f"\nSELLABLE: {', '.join(by['sellable']) or 'none'}")
     print(f"WAITING (no buyers yet): {', '.join(by['waiting']) or 'none'}")
     print(f"DRAINED (leave out of the summary): {', '.join(by['drained']) or 'none'}")
     REPORTS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%MZ")
-    report = {"at": stamp, "wallet": WALLET, "ethUsd": eth_usd, "imdUsd": imd_usd, "gasPriceGwei": gas_price / 1e9, "rows": rows}
+    report = {"at": stamp, "wallet": WALLET, "ethUsd": eth_usd, "imdUsd": imd_usd,
+              "gasPriceGwei": {CHAINS[c]["name"]: g / 1e9 for c, g in gas_price.items()}, "rows": rows}
     path = REPORTS / f"scan-{stamp}.json"
     path.write_text(json.dumps(report, indent=2))
-    print(f"\nETH ${eth_usd:,.2f} | IMD ${imd_usd or 0:,.3f} | gas {gas_price / 1e9:.3f} gwei | report {path}")
+    gas = ", ".join(f"{CHAINS[c]['name']} {g / 1e9:.3f}" for c, g in gas_price.items())
+    print(f"\nETH ${eth_usd:,.2f} | IMD ${imd_usd or 0:,.3f} | gas (gwei) {gas} | report {path}")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,8 @@ description: Check an IdentityMD seat's claimable launch-reward tokens, verify e
 Every token launch on the IdentityMD plane gives active workers a share of its supply through a
 per-launch `MerkleDistributor`, paid to the wallet that owns the seat's NFT. Nothing arrives by itself:
 each must be **claimed**
-with a mainnet transaction. Most allocations are Sepolia (worthless); the mainnet ones are worth
+with a transaction on the launch's chain. Most allocations are Sepolia (worthless); the Ethereum and
+Robinhood Chain ones are worth
 anything from $0 to tens of dollars, and some launch tokens are traps or dead markets. This skill
 decides which are worth the gas.
 
@@ -20,6 +21,15 @@ NFT; the explorer shows it at `explorer.imd.fun/wallet/<address>/earned`). It's 
 a public Ethereum RPC, GitHub and DexScreener.
 
 Paths below are relative to this skill's folder (`.claude/skills/imd-claims/`).
+
+## Chains
+
+Launch rewards pay out on **Ethereum (1)** and **Robinhood Chain (4663)**, an Arbitrum chain with its
+own bridged IMD (`0x5f7bb59365ce557c26dbcaa4ee9d39a4b95b7127`). Sepolia is testnet and skipped. The
+scanner's `CHAINS` table holds each chain's RPC, Uniswap v4 PoolManager and Quoter, launch factory, guard
+hook and IMD. If it warns about an unknown chain, add it there (and to `RPCS` in the claim builder) from
+the plane's `packages/contracts/deployments/<chain>.json` and `apps/explorer/lib/uniswap.ts` in
+[Identity-md/protocol](https://github.com/Identity-md/protocol).
 
 ## 1. Scan
 
@@ -65,10 +75,10 @@ The scanner flags; you judge. For every launch still in play:
    `PoolInitializationGuard`, which can't touch swaps or liquidity. Anything else (beforeSwap,
    ReturnsDelta, …) means the pool can tax or block trades: read the hook before claiming.
 6. The **launch liquidity can't be pulled**: the factory holds it and only ever adds liquidity or
-   collects fees with a zero delta. See `PoolFees.sol` and `LaunchLiquidity.sol` in
-   [Identity-md/protocol](https://github.com/Identity-md/protocol/tree/master/packages/contracts/src);
-   re-check only if the plane's factory address changes from
-   `0xfF03410d0Fe5fa8f7F59F743de35E333D9857120`.
+   collects fees with a zero delta. Verified for Ethereum's factory `0xff03410d…` and Robinhood
+   Chain's `0x9c9d2fcb…` (plane commit `b5dd2eb7`). See `PoolFees.sol` and `LaunchLiquidity.sol` in
+   [Identity-md/protocol](https://github.com/Identity-md/protocol/tree/master/packages/contracts/src).
+   Re-check if a chain's factory address changes or a new chain appears.
 
 ## 3. Liquidity analysis
 
@@ -88,7 +98,10 @@ of dollars. Judge by what a sale actually pays:
   swaps: `cast logs --address <PoolManager> <Swap topic> <poolId>`.
 - **Churn**: volume far above the pool's paired side (e.g. a bot buying and immediately selling)
   means a volatile price. Mention it, since the value can move a lot before the user acts.
-- The paired asset matters: IMD-paired proceeds arrive in IMD, ETH-paired in ETH.
+- The paired asset matters: proceeds arrive in whatever the pool pairs with: ETH, IMD (the chain's own:
+  bridged IMD on Robinhood Chain), or another token such as FWA on Ethereum. The scanner prices each
+  from its own deepest pool on that chain (`pairedPriceSource`). If a chain's IMD has no pool, it falls
+  back to mainnet IMD and says so: treat that value as an estimate.
 
 ## 4. Recommend
 
@@ -111,7 +124,10 @@ If nothing is sellable, say so in one line, plus the waiting line.
 
 Give the user one table of the sellable allocations, then a verdict per token:
 
-| Token | Launch | Contract | Pool | Sale quote (fill %) | Claim gas | Claimable | Verdict | Claim |
+| Token | Launch | Chain | Contract | Pool | Sale quote (fill %) | Claim gas | Claimable | Verdict | Claim |
+
+The **Chain** column is Ethereum or Robinhood Chain. Claim gas on Robinhood Chain excludes the L1 data
+fee Arbitrum chains add; it's still cents.
 
 The **Claimable** column says when the claim opens, from the report's `claimableIn`: "now", or
 "in 47m (01:57Z)" for a launch still inside its one-hour lock. Add the claim-by date (`sweepableFrom`,
@@ -144,7 +160,8 @@ cd .claude/skills/imd-claims/claim && python3 -m http.server 3334 --bind 127.0.0
 ```
 
 Then the user claims on each token's explorer.imd.fun claim page (the link in the table), or opens
-http://localhost:3334, connects the seat wallet on mainnet, and claims there. The page
+http://localhost:3334, connects the seat wallet, and claims there; the page switches the wallet to each claim's chain, adding
+Robinhood Chain if the wallet doesn't know it. The page
 re-simulates each claim before MetaMask signs. Anyone may submit a claim (tokens always go to our
 wallet), but the wallet pays gas. **Never** read or use a private key to send a claim.
 

@@ -9,7 +9,8 @@ Usage: python3 build_claims.py --wallet 0xYourSeatWallet 737 741 747   (or set I
 import json, os, subprocess, sys, time, urllib.request
 
 os.environ["FOUNDRY_DISABLE_NIGHTLY_WARNING"] = "1"
-R = "https://ethereum-rpc.publicnode.com"
+# RPC per chain IdentityMD launches on with value; keep in step with CHAINS in ../scan.py.
+RPCS = {1: "https://ethereum-rpc.publicnode.com", 4663: "https://rpc.mainnet.chain.robinhood.com"}
 args = sys.argv[1:]
 W = os.environ.get("IMD_WALLET", "")
 if args[:1] == ["--wallet"]:
@@ -32,9 +33,14 @@ def get(url):
     raise SystemExit(f"could not fetch {url}")
 
 
-launches = {x["launchNumber"]: x for x in get(f"https://api.imd.fun/wallets/{W}/earnings?limit=200")["earnings"] if x["chainId"] == 1}
+launches = {x["launchNumber"]: x for x in get(f"https://api.imd.fun/wallets/{W}/earnings?limit=200")["earnings"] if x["chainId"] in RPCS}
 out = []
 for n in map(int, args):
+    if n not in launches:
+        print(f"#{n}: no allocation on a supported chain for this wallet")
+        continue
+    chain_id = launches[n]["chainId"]
+    R = RPCS[chain_id]
     d = get(f"https://api.imd.fun/launches/{launches[n]['launchId']}?claims=1")
     dist = next(a["address"] for a in d["artifacts"] if a["name"] == "MerkleDistributor")
     tok = next(a["address"] for a in d["artifacts"] if a["name"] not in ("MerkleDistributor", "PoolInitializationGuard"))
@@ -59,6 +65,6 @@ for n in map(int, args):
             sim = "REVERT " + ex.output.decode()[-200:]
     root_ok = h.lower() == root.lower()
     print(f"{sym:5} #{n} distributor {dist} amount {amount / 1e18:,.2f} | root matches chain: {root_ok} | already claimed: {already} | simulated: {sim}")
-    out.append({"symbol": sym, "launch": n, "token": tok, "account": W, "to": dist, "data": data, "amount": str(amount),
+    out.append({"symbol": sym, "launch": n, "chainId": chain_id, "token": tok, "account": W, "to": dist, "data": data, "amount": str(amount),
                 "proof": proof, "rootVerified": root_ok, "unlocksAt": int(unlocks), "simulation": sim})
 json.dump(out, open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "claims.json"), "w"), indent=2)
