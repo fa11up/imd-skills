@@ -29,6 +29,7 @@ WALLET = None  # the seat owner's wallet, from --wallet or IMD_WALLET
 IMD = "0xd34a99bc0f67ae1bbd63c660e6d0b0dd03e263b7"
 POOL_MANAGER = "0x000000000004444c5dc75cB358380D2e3dE08A90"
 CHAINLINK_ETH_USD = "0x5f4eC3Df9cbd43714FE2740f5E3616155c5b8419"
+V4_QUOTER = "0x52f0e24d1c21c8a0cb1e5a5dd6198556bd9e1203"  # Uniswap v4 Quoter, mainnet
 
 # v4 hook permission bits (lowest 14 bits of the hook address)
 HOOK_FLAGS = [(13, "beforeInitialize"), (12, "afterInitialize"), (11, "beforeAddLiquidity"), (10, "afterAddLiquidity"),
@@ -188,10 +189,45 @@ def pool_check(launch, token_addr, hook):
     other_per_token = (p01 if token_addr.lower() == c0 else (1 / p01 if p01 else 0.0))
     hook_bits = int(hook, 16) & 0x3FFF
     perms = [name for bit, name in HOOK_FLAGS if hook_bits >> bit & 1]
-    return {"poolId": pid, "pairedWith": "ETH" if other.endswith("0" * 40) else ("IMD" if other == IMD else other),
+    return {"poolId": pid, "_other": other, "pairedWith": "ETH" if other.endswith("0" * 40) else ("IMD" if other == IMD else other),
             "fee": fee, "tickSpacing": tick_spacing, "hook": hook, "hookPermissions": perms,
             "initialized": sqrtp != 0, "tick": tick, "atMinOrMaxTick": abs(tick) >= 887200,
             "inRangeLiquidity": liq, "pairedPerToken": other_per_token}
+
+
+def sell_quote(pool, token_addr, amount_raw):
+    """What selling `amount_raw` of the token into the launch pool actually pays, from Uniswap's v4 Quoter.
+
+    Launch pools are seeded one-sided with the new token, so the only IMD/ETH inside is what buyers have
+    put in. Price x amount says nothing about that; this does. If the whole amount can't be filled
+    (NotEnoughLiquidity), binary-search the largest amount that can be and report its proceeds."""
+    c0, c1 = sorted([token_addr.lower(), pool["_other"]])
+    zero_for_one = token_addr.lower() == c0
+    key = f"(({c0},{c1},{pool['fee']},{pool['tickSpacing']},{pool['hook']}),{str(zero_for_one).lower()},{{}},0x)"
+
+    def q(raw):
+        try:
+            out = cast("call", "--rpc-url", RPC, V4_QUOTER,
+                       "quoteExactInputSingle(((address,address,uint24,int24,address),bool,uint128,bytes))(uint256,uint256)",
+                       key.format(raw))
+            return int(out.split()[0])
+        except subprocess.CalledProcessError:
+            return None
+
+    full = q(amount_raw)
+    if full is not None:
+        return {"fillable": amount_raw, "fillPct": 100.0, "proceeds": full}
+    lo, hi, best = 0, amount_raw, (0, 0)
+    for _ in range(14):  # ~0.01% resolution
+        mid = (lo + hi) // 2
+        if mid == 0:
+            break
+        r = q(mid)
+        if r is None:
+            hi = mid
+        else:
+            lo, best = mid, (mid, r)
+    return {"fillable": best[0], "fillPct": 100.0 * best[0] / amount_raw if amount_raw else 0.0, "proceeds": best[1]}
 
 
 def main():
@@ -259,6 +295,14 @@ def main():
         unit = imd_usd if pool.get("pairedWith") == "IMD" else (eth_usd if pool.get("pairedWith") == "ETH" else None)
         price_onchain = pool.get("pairedPerToken", 0) * unit if unit else None
         amt = int(x["amount"]) / 10 ** x["token"]["decimals"]
+        sq = None
+        if pool.get("initialized") and unit and not row["claim"].get("error"):
+            try:
+                sq = sell_quote(pool, tok, int(x["amount"]))
+                sq["proceedsPaired"] = sq["proceeds"] / 1e18
+                sq["proceedsUsd"] = sq["proceedsPaired"] * unit
+            except Exception as ex:
+                sq = {"error": str(ex)}
         row["market"] = {
             "priceUsdOnchain": price_onchain,
             "marketCapUsd": price_onchain * 1e9 if price_onchain else None,
@@ -268,7 +312,10 @@ def main():
                 "txns24h": (best.get("txns") or {}).get("h24"), "fdv": best.get("fdv"), "url": best.get("url"),
                 "otherPools": len(pairs) - 1},
             "ourAmount": amt,
-            "ourValueUsd": amt * price_onchain if price_onchain else None,
+            "priceTimesAmountUsd": amt * price_onchain if price_onchain else None,
+            "sellQuote": sq,
+            # what a sale of our whole allocation would actually pay now (the part the pool can absorb)
+            "ourValueUsd": (sq or {}).get("proceedsUsd") if sq and "error" not in sq else None,
             "claimGasUsd": (row["claim"].get("gas", 120000) * gas_price / 1e18 * eth_usd),
         }
         rows.append(row)
@@ -287,7 +334,11 @@ def main():
         print(f"   pool: vs {pool.get('pairedWith')} hook perms {pool.get('hookPermissions')} tick {pool.get('tick')} in-range liquidity {pool.get('inRangeLiquidity')}{' AT MIN/MAX TICK' if pool.get('atMinOrMaxTick') else ''}")
         d = m["dexscreener"] or {}
         pv = m["priceUsdOnchain"]
-        print(f"   market: price ${pv if pv is None else f'{pv:.10f}'} mcap ${(m['marketCapUsd'] or 0):,.0f} | ds liq ${d.get('liquidityUsd') or 0:,.0f} vol24 ${d.get('volume24h') or 0:,.0f} | ours ~${(m['ourValueUsd'] or 0):,.2f}")
+        print(f"   market: price ${pv if pv is None else f'{pv:.10f}'} mcap ${(m['marketCapUsd'] or 0):,.0f} | ds liq ${d.get('liquidityUsd') or 0:,.0f} vol24 ${d.get('volume24h') or 0:,.0f} | price x ours ${(m['priceTimesAmountUsd'] or 0):,.2f}")
+        if sq and "error" not in sq:
+            print(f"   SALE QUOTE: selling all {amt:,.0f} pays {sq['proceedsPaired']:.6f} {pool.get('pairedWith')} (~${sq['proceedsUsd']:,.2f}); pool absorbs {sq['fillPct']:.1f}% of our allocation")
+        elif sq:
+            print(f"   sale quote failed: {sq['error'][-120:]}")
 
     REPORTS = Path(a.out)
     REPORTS.mkdir(parents=True, exist_ok=True)

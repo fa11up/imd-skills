@@ -70,25 +70,29 @@ The scanner flags; you judge. For every launch still in play:
 
 ## 3. Liquidity analysis
 
-From the report's `pool` and `market` sections:
+**Launch pools are seeded one-sided**, with the new token only. The only IMD or ETH inside is what
+buyers have put in, net of what sellers took out. So a pool can show tens of thousands of dollars of
+"liquidity" on DexScreener (which counts the token side) while a sale of our allocation pays a couple
+of dollars. Judge by what a sale actually pays:
 
-- **`inRangeLiquidity: 0` or `atMinOrMaxTick: true`** means there's nothing to sell into right now,
-  whatever DexScreener's price says. A token at tick ±887272 has been sold through every position (a
-  drain). Look at the last swaps to see who drained it:
-  `cast logs --address <PoolManager> <Swap topic> <poolId>`.
-- **Value** = `ourValueUsd` (on-chain price × our amount). DexScreener under-prices IMD-paired pools
-  and lists thin side pools; prefer the on-chain price from the launch pool.
-- **Exit capacity**: our sale should be small next to the launch pool's liquidity. If our allocation
-  is a meaningful share of it, the realised value will be well below `ourValueUsd`.
-- **Churn**: volume far above liquidity (e.g. 20×+) means bots and a volatile price; mention it,
-  since the value can move a lot before the user acts.
+- **`market.sellQuote` is the value.** The scanner asks Uniswap's v4 Quoter what selling our whole
+  allocation into the launch pool pays. If the pool can't fill all of it, it finds the largest amount
+  that fills (`fillPct`) and what that pays (`proceedsUsd`). `ourValueUsd` is that figure. Treat
+  `priceTimesAmountUsd` as a ceiling only, never as value.
+- **`fillPct` below 100** means the pool runs out of IMD/ETH before our allocation is sold. Say so in
+  the table: the rest is unsellable until buyers add more.
+- **`inRangeLiquidity: 0` or `atMinOrMaxTick: true`** means nothing to sell into at all. A token at
+  tick ±887272 has been sold through every position (a drain). To see who did it, look at the last
+  swaps: `cast logs --address <PoolManager> <Swap topic> <poolId>`.
+- **Churn**: volume far above the pool's paired side (e.g. a bot buying and immediately selling)
+  means a volatile price. Mention it, since the value can move a lot before the user acts.
 - The paired asset matters: IMD-paired proceeds arrive in IMD, ETH-paired in ETH.
 
 ## 4. Recommend
 
 Give the user one table, then a verdict per token:
 
-| Token | Launch | Contract | Pool | Liquidity | Our value | Claim gas | Claimable | Verdict | Claim |
+| Token | Launch | Contract | Pool | Sale quote (fill %) | Claim gas | Claimable | Verdict | Claim |
 
 The **Claimable** column says when the claim opens, from the report's `claimableIn`: "now", or
 "in 47m (01:57Z)" for a launch still inside its one-hour lock. Add the claim-by date (`sweepableFrom`,
@@ -99,10 +103,11 @@ The **Claim** column links each token's IdentityMD claim page, `https://explorer
 
 Verdicts, each led by its emoji. The emoji goes in the **Verdict** column only; the Contract column
 states the finding in words (e.g. "plain OZ ERC-20, exact match", "8% fee, claim + Uniswap sell exempt"):
-- ✅ **Claim**: safe contract, liquid pool, value clearly above gas (say 5× the claim gas). Mention
-  any fee path to avoid.
-- 🟡 **Optional**: safe and liquid, but the value is close to gas.
-- ⏸️ **Skip**: dead or drained pool, or value below gas. Still claimable until the sweep date, so
+- ✅ **Claim**: safe contract, and the sale quote is clearly above gas (say 5× the claim gas plus
+  a sale's ~150k gas). Mention any fee path to avoid.
+- 🟡 **Optional**: safe, but the sale quote is close to gas, or only a small part of the allocation
+  can be sold.
+- ⏸️ **Skip**: dead or drained pool, nothing to sell into yet, or a sale quote below gas. Still claimable until the sweep date, so
   note it.
 - ⛔ **Do not claim**: the contract can freeze, tax or block the sale, or its bytecode doesn't match
   its source.
