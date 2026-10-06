@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Claim launch rewards</title>
+<style>
+  :root { --bg:#F7F5EF; --surface:#FFFDF8; --ink:#16202E; --muted:#5A6472; --rule:#D8D3C7; --ok:#2F5D50; --bad:#8C2F2F; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:14px/1.6 "SFMono-Regular", Menlo, Consolas, monospace; }
+  main { max-width:760px; margin:40px auto; padding:0 16px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  p.sub { color:var(--muted); margin:0 0 24px; }
+  .card { background:var(--surface); border:1px solid var(--rule); padding:16px; margin:0 0 12px; }
+  .row { display:flex; justify-content:space-between; gap:12px; flex-wrap:wrap; align-items:center; }
+  .sym { font-weight:700; font-size:16px; }
+  .meta { color:var(--muted); font-size:12px; word-break:break-all; }
+  button { font:inherit; background:var(--ink); color:var(--bg); border:0; padding:8px 14px; cursor:pointer; }
+  button:disabled { background:var(--rule); color:var(--muted); cursor:default; }
+  .status { margin-top:8px; font-size:12px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  #top button { margin-bottom:16px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Claim launch rewards</h1>
+  <p class="sub">Seat wallet <span id="want"></span> · Ethereum mainnet. Each claim is re-simulated before your wallet is asked to sign.</p>
+  <div id="top"><button id="connect">Connect wallet</button> <span id="acct" class="meta"></span></div>
+  <div id="list"></div>
+</main>
+<script>
+let WANT = "";
+let account = null, claims = [];
+const eth = window.ethereum;
+const fmt = (wei) => (Number(BigInt(wei) / 10n ** 14n) / 1e4).toLocaleString(undefined, { maximumFractionDigits: 2 });
+
+async function ensureMainnet() {
+  const id = await eth.request({ method: "eth_chainId" });
+  if (id !== "0x1") await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: "0x1" }] });
+}
+
+function render() {
+  const list = document.getElementById("list");
+  list.innerHTML = "";
+  for (const c of claims) {
+    const unlocked = Date.now() / 1000 >= c.unlocksAt;
+    const el = document.createElement("div");
+    el.className = "card";
+    el.innerHTML = `<div class="row"><div><div class="sym">${c.symbol} <span class="meta">launch #${c.launch}</span></div>
+      <div>${fmt(c.amount)} ${c.symbol}</div>
+      <div class="meta"><a href="https://explorer.imd.fun/token/${c.token}" target="_blank" rel="noreferrer">claim page on explorer.imd.fun ↗</a><br>distributor ${c.to}<br>token ${c.token}<br>proof verified against the on-chain root: ${c.rootVerified ? "yes" : "NO"}</div></div>
+      <button ${!account || !c.rootVerified || !unlocked ? "disabled" : ""}>${unlocked ? "Claim" : "Unlocks " + new Date(c.unlocksAt * 1000).toUTCString().slice(17, 25) + "Z"}</button></div>
+      <div class="status meta"></div>`;
+    const btn = el.querySelector("button"), st = el.querySelector(".status");
+    btn.onclick = async () => {
+      btn.disabled = true;
+      try {
+        await ensureMainnet();
+        st.className = "status meta"; st.textContent = "Simulating…";
+        await eth.request({ method: "eth_call", params: [{ from: account, to: c.to, data: c.data }, "latest"] });
+        st.textContent = "Simulation passed. Confirm in your wallet…";
+        const hash = await eth.request({ method: "eth_sendTransaction", params: [{ from: account, to: c.to, data: c.data }] });
+        st.className = "status ok";
+        st.innerHTML = `Sent: <a href="https://etherscan.io/tx/${hash}" target="_blank" rel="noreferrer">${hash}</a>`;
+      } catch (e) {
+        st.className = "status bad";
+        st.textContent = (e && (e.message || e.data?.message)) || String(e);
+        btn.disabled = false;
+      }
+    };
+    list.appendChild(el);
+  }
+}
+
+document.getElementById("connect").onclick = async () => {
+  if (!eth) { document.getElementById("acct").textContent = "No wallet found in this browser."; return; }
+  const [a] = await eth.request({ method: "eth_requestAccounts" });
+  account = a.toLowerCase();
+  const note = document.getElementById("acct");
+  if (account !== WANT) { note.className = "meta bad"; note.textContent = `Connected ${a}, but these claims pay ${WANT}. Switch accounts.`; account = null; }
+  else { note.className = "meta ok"; note.textContent = `Connected ${a}`; await ensureMainnet(); }
+  render();
+};
+
+fetch("claims.json").then((r) => r.json()).then((j) => {
+  claims = j;
+  WANT = (j[0] && j[0].account) || "";
+  document.getElementById("want").textContent = WANT || "(no claims built yet)";
+  render();
+});
+</script>
+</body>
+</html>

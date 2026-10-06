@@ -1,0 +1,4 @@
+imd-claims-reports/
+imd-claims/claim/claims.json
+__pycache__/
+.DS_Store
