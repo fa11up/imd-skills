@@ -318,6 +318,18 @@ def main():
             "ourValueUsd": (sq or {}).get("proceedsUsd") if sq and "error" not in sq else None,
             "claimGasUsd": (row["claim"].get("gas", 120000) * gas_price / 1e18 * eth_usd),
         }
+        # What the user should care about. Drained: the paired side was sold out of the pool (price
+        # pinned at a tick bound, or nothing in range after trading), so a sale pays nothing. Waiting:
+        # a fresh launch nobody has bought into yet; it could still become worth something. Sellable:
+        # a sale of our allocation pays something now.
+        sold = (sq or {}).get("proceedsUsd") or 0
+        traded = ((best or {}).get("volume") or {}).get("h24") or 0
+        if pool.get("atMinOrMaxTick") or (not pool.get("inRangeLiquidity") and traded and sold == 0):
+            row["status"] = "drained"
+        elif sold > 0:
+            row["status"] = "sellable"
+        else:
+            row["status"] = "waiting"
         rows.append(row)
         c, k, m = row["claim"], row.get("contract", {}), row["market"]
         bm = k.get("bytecodeMatch") or {}
@@ -326,6 +338,7 @@ def main():
         when = "unknown" if not ua else ("claimable now" if now >= ua else
                f"claimable in {int((ua - now) // 3600)}h{int((ua - now) % 3600 // 60):02d}m ({time.strftime('%H:%MZ', time.gmtime(ua))})")
         c["claimableIn"] = when
+        print(f"   status: {row['status'].upper()}")
         print(f"   claim: {amt:,.0f} {sym} | {when} | claim by {time.strftime('%Y-%m-%d', time.gmtime(sw)) if sw else '?'} | root ok {c.get('rootVerified')} | claimed {c.get('claimed')} | {c.get('simulation')} | gas ~${m['claimGasUsd']:.2f}")
         print(f"   contract: {k.get('sourceLines')} lines, bytecode match {bm.get('equal')} ({bm.get('immutablesMasked', 0)} immutables masked), flags {list((k.get('riskFlags') or {}).keys()) or 'none'}")
         oz = [o for o in k.get("openzeppelin") or [] if not o["verdict"].startswith("identical")]
@@ -341,6 +354,10 @@ def main():
             print(f"   sale quote failed: {sq['error'][-120:]}")
 
     REPORTS = Path(a.out)
+    by = {k: [f"#{r['launch']} {r['symbol']}" for r in rows if r.get("status") == k] for k in ("sellable", "waiting", "drained")}
+    print(f"\nSELLABLE: {', '.join(by['sellable']) or 'none'}")
+    print(f"WAITING (no buyers yet): {', '.join(by['waiting']) or 'none'}")
+    print(f"DRAINED (leave out of the summary): {', '.join(by['drained']) or 'none'}")
     REPORTS.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%MZ")
     report = {"at": stamp, "wallet": WALLET, "ethUsd": eth_usd, "imdUsd": imd_usd, "gasPriceGwei": gas_price / 1e9, "rows": rows}

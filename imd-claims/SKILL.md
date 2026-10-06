@@ -90,7 +90,22 @@ of dollars. Judge by what a sale actually pays:
 
 ## 4. Recommend
 
-Give the user one table, then a verdict per token:
+Show only what the user should care about. The scanner gives each allocation a `status`:
+
+- **sellable**: a sale of our allocation pays something now. These go in the table.
+- **waiting**: a fresh launch nobody has bought into yet (nothing in range, no trades). List them on
+  one line under the table ("Waiting for buyers: …"), since one could become worth claiming; re-scan
+  later. Mention one specially only if our allocation is unusually large.
+- **drained**: the pool's IMD/ETH side has been sold out (price at a tick bound, or nothing in range
+  after trading), so a sale pays nothing. **Leave these out entirely**: no rows, no list. If the user
+  asks, they're in the report JSON and the scanner's `DRAINED` line. (The factory can't pull launch
+  liquidity; drains come from selling.)
+
+A security problem always shows, whatever the status: any ⛔ finding gets its own row.
+
+If nothing is sellable, say so in one line, plus the waiting line.
+
+Give the user one table of the sellable allocations, then a verdict per token:
 
 | Token | Launch | Contract | Pool | Sale quote (fill %) | Claim gas | Claimable | Verdict | Claim |
 
@@ -107,7 +122,7 @@ states the finding in words (e.g. "plain OZ ERC-20, exact match", "8% fee, claim
   a sale's ~150k gas). Mention any fee path to avoid.
 - 🟡 **Optional**: safe, but the sale quote is close to gas, or only a small part of the allocation
   can be sold.
-- ⏸️ **Skip**: dead or drained pool, nothing to sell into yet, or a sale quote below gas. Still claimable until the sweep date, so
+- ⏸️ **Skip**: sellable, but the sale quote is below the gas to claim and sell. Still claimable until the sweep date, so
   note it.
 - ⛔ **Do not claim**: the contract can freeze, tax or block the sale, or its bytecode doesn't match
   its source.
