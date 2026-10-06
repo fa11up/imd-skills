@@ -38,6 +38,10 @@ python3 .claude/skills/imd-claims/scan.py --wallet 0xYourSeatWallet             
 python3 .claude/skills/imd-claims/scan.py --wallet 0xYourSeatWallet --launch 757 756  # just these launches
 ```
 
+**Discovery** merges two sources: the wallet's earnings index, and a sweep of every live launch on a
+supported chain whose frozen claim tree names the wallet. The second is the source of truth, so an
+allocation the index misses or lags on is still found (the scanner says so when it happens).
+
 About a minute per eight launches. It prints a block per launch and writes the full JSON to
 `imd-claims-reports/scan-<time>.json` (change with `--out`). Per launch it checks:
 
@@ -71,10 +75,16 @@ The scanner flags; you judge. For every launch still in play:
    - owner, mint, pause, blocklist, max-tx or trading toggles, upgrade, external calls: what can the
      privileged party do to OUR balance or our ability to sell? Redirecting fees is tolerable;
      freezing, minting or blocking sells is not.
-5. **Hook permissions** should be `['beforeInitialize']` only: the platform's
+5. **Custom-hook launches.** A `univ4_hook` launch trades in a pool with its **own hook** (the
+   artifact with role `hook`), not the platform guard; the scanner prints `CUSTOM HOOK`. Read the hook's
+   source in full: what it takes on swaps (a fee on `beforeSwap`/`afterSwap` with ReturnsDelta), where
+   that goes, and whether anything can make a swap revert for us (allowlists, trading switches, price
+   bands that refuse trades). A fixed fee is fine: the sale quote already includes it, since the Quoter
+   runs the hook. A hook that can block or confiscate is ⛔.
+6. **Hook permissions** for every other launch should be `['beforeInitialize']` only: the platform's
    `PoolInitializationGuard`, which can't touch swaps or liquidity. Anything else (beforeSwap,
    ReturnsDelta, …) means the pool can tax or block trades: read the hook before claiming.
-6. The **launch liquidity can't be pulled**: the factory holds it and only ever adds liquidity or
+7. The **launch liquidity can't be pulled**: the factory holds it and only ever adds liquidity or
    collects fees with a zero delta. Verified for Ethereum's factory `0xff03410d…` and Robinhood
    Chain's `0x9c9d2fcb…` (plane commit `b5dd2eb7`). See `PoolFees.sol` and `LaunchLiquidity.sol` in
    [Identity-md/protocol](https://github.com/Identity-md/protocol/tree/master/packages/contracts/src).

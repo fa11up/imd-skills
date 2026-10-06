@@ -300,6 +300,40 @@ def paired_usd(ch, addr, eth_usd, cache):
     return cache[key]
 
 
+def discover(eth_usd_unused=None):
+    """Every allocation for WALLET on a supported chain, from two sources merged by launch number:
+    the wallet earnings index (fast, but an index), and a sweep of every live launch on those chains
+    whose frozen claim tree names WALLET (the source of truth: catches anything the index misses or lags).
+    Returns (allocations, launch_details_by_id) so details aren't fetched twice."""
+    allocs = {x["launchNumber"]: x for x in get(f"{API}/wallets/{WALLET}/earnings?limit=200")["earnings"]}
+    details = {}
+    launches, before = [], None
+    while True:
+        page = get(f"{API}/launches?limit=500" + (f"&before={before}" if before else ""))["launches"]
+        launches += page
+        if len(page) < 500:
+            break
+        before = min(l["launchNumber"] for l in page)
+    live = [l for l in launches if l.get("chainId") in CHAINS and l.get("status") == "live"]
+    for l in live:
+        if not any(a.get("role") == "distributor" or a.get("name") == "MerkleDistributor" for a in l.get("artifacts") or []):
+            continue  # contracts-only launches pay no token
+        d = get(f"{API}/launches/{l['id']}?claims=1")
+        details[l["id"]] = d
+        leaf = next((x for x in ((d.get("claims") or {}).get("leaves") or []) if x["wallet"].lower() == WALLET), None)
+        if not leaf or l["launchNumber"] in allocs:
+            continue
+        tok = next(a["address"].lower() for a in d["artifacts"] if a.get("role") == "token")
+        ch = CHAINS[l["chainId"]]
+        sym = cast("call", "--rpc-url", ch["rpc"], tok, "symbol()(string)").strip('"')
+        name = cast("call", "--rpc-url", ch["rpc"], tok, "name()(string)").strip('"')
+        dec = int(cast("call", "--rpc-url", ch["rpc"], tok, "decimals()(uint8)").split()[0])
+        allocs[l["launchNumber"]] = {"launchId": l["id"], "launchNumber": l["launchNumber"], "chainId": l["chainId"],
+                                     "kind": l.get("kind"), "amount": leaf["amount"], "_fromClaimTree": True,
+                                     "token": {"address": tok, "symbol": sym, "name": name, "decimals": dec}}
+    return list(allocs.values()), details
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--all", action="store_true", help="include already-claimed allocations")
@@ -315,7 +349,11 @@ def main():
     workdir = Path(a.workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
-    earnings = get(f"{API}/wallets/{WALLET}/earnings?limit=200")["earnings"]
+    earnings, details = discover()
+    extra = [x for x in earnings if x.get("_fromClaimTree")]
+    if extra:
+        print(f"found {len(extra)} allocation(s) in claim trees that the earnings index doesn't list: "
+              + ", ".join(f"#{x['launchNumber']} {x['token']['symbol']}" for x in extra))
     valued = [x for x in earnings if x["chainId"] in CHAINS]
     unknown = sorted({x["chainId"] for x in earnings if x["chainId"] not in CHAINS and x["chainId"] not in TESTNETS})
     per = ", ".join(f"{sum(1 for x in valued if x['chainId'] == c)} {CHAINS[c]['name']}" for c in CHAINS)
@@ -339,12 +377,15 @@ def main():
         n, sym, tok = x["launchNumber"], x["token"]["symbol"], x["token"]["address"].lower()
         ch = CHAINS[x["chainId"]]
         print(f"\n== #{n} {sym} ({x['token']['name']}) {tok} [{ch['name']}]\n   claim page: https://explorer.imd.fun/token/{tok}", flush=True)
-        L = get(f"{API}/launches/{x['launchId']}?claims=1")
+        L = details.get(x["launchId"]) or get(f"{API}/launches/{x['launchId']}?claims=1")
         arts = {a_["name"]: a_["address"].lower() for a_ in L["artifacts"]}
-        dist = arts.get("MerkleDistributor")
-        hook = arts.get("PoolInitializationGuard")
+        role = {a_.get("role"): a_["address"].lower() for a_ in L["artifacts"] if a_.get("role")}
+        # By role, not name: a univ4_hook launch's pool uses its OWN hook, not the platform guard.
+        dist = role.get("distributor") or arts.get("MerkleDistributor")
+        hook = role.get("hook") or arts.get("PoolInitializationGuard")
         token_name = next((k for k, v in arts.items() if v == tok), None)
         row = {"launch": n, "symbol": sym, "name": x["token"]["name"], "token": tok, "launchId": x["launchId"],
+               "kind": L.get("kind"), "hook": hook, "platformGuard": hook == ch["guardHook"],
                "chainId": x["chainId"], "chain": ch["name"], "explorer": f"{ch['explorer']}/token/{tok}",
                "claimPage": f"https://explorer.imd.fun/token/{tok}",
                "requester": L.get("requester"), "economics": L.get("economics"), "artifacts": arts,
@@ -427,6 +468,8 @@ def main():
         oz = [o for o in k.get("openzeppelin") or [] if o["verdict"].startswith("DIFFERS")]
         if k.get("openzeppelin"):
             print(f"   openzeppelin: {len(k['openzeppelin'])} compiled files, {'all genuine (official release or formatting-only)' if not oz else str(len(oz)) + ' DIFFER: ' + ', '.join(o['file'] for o in oz)}")
+        if hook and hook != ch["guardHook"]:
+            print(f"   CUSTOM HOOK {hook} ({next((k for k, v in arts.items() if v == hook), '?')}): read its source before any verdict")
         print(f"   pool: vs {pool.get('pairedWith')} hook perms {pool.get('hookPermissions')} tick {pool.get('tick')} in-range liquidity {pool.get('inRangeLiquidity')}{' AT MIN/MAX TICK' if pool.get('atMinOrMaxTick') else ''}")
         d = m["dexscreener"] or {}
         pv = m["priceUsdOnchain"]
