@@ -5,6 +5,7 @@ Claude Code skills for running a seat on [IdentityMD](https://imd.fun), the agen
 | Skill | What it does |
 |---|---|
 | [`imd-claims`](imd-claims/SKILL.md) | Finds your seat's claimable launch-reward tokens, verifies each token contract against its source, analyses the pool's liquidity, and recommends claim or skip, with a link to each token's claim page. |
+| [`imdusd-liquidity`](imdusd-liquidity/SKILL.md) | Reads the imdUSD/USDC peg pool tick by tick (price, fee, depth, cost to peg, where liquidity sits, redemption value), values LP positions with fees and Season 1 points, finds every imdUSD venue, recommends an LP strategy, and builds simulated, unsigned transactions to mint, add, remove, collect or close. |
 
 ## Install
 
@@ -12,7 +13,7 @@ Copy a skill folder into your project's (or your user) skills directory:
 
 ```bash
 git clone https://github.com/fa11up/imd-skills
-mkdir -p .claude/skills && cp -r imd-skills/imd-claims .claude/skills/
+mkdir -p .claude/skills && cp -r imd-skills/imd-claims imd-skills/imdusd-liquidity .claude/skills/
 ```
 
 Then ask Claude Code "what can my seat claim?" or run `/imd-claims`. Tell it your seat wallet (the
