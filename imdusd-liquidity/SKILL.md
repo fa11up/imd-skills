@@ -110,7 +110,7 @@ is printed.
   before simulating.
 - **Signing.** `--safe file.json` writes a Safe Transaction Builder batch. `--json` prints each step's
   `to` and `data` for `cast send <to> <data> --rpc-url <rpc> --ledger` or any wallet.
-- **Deadline.** The deadline is 30 minutes. Rebuild after that, or after the price moves.
+- **Deadline.** The deadline is 30 minutes by default; a Safe collecting signatures needs `--deadline-hours 24`. Rebuild after it, or after the price moves.
 - **Ranges.** For the peg band or the wide range, the imdusd.com terminal's *imdUSD liquidity* window
   does the same with its own UI. Custom ranges need `tx`.
 

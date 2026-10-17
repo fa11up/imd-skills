@@ -610,7 +610,7 @@ def build_tx(args):
     block = head()
     sp, tick, _ = slot0(PEG_POOL, block)
     now = int(rpc("eth_getBlockByNumber", [block, False])["timestamp"], 16)
-    deadline = now + 1800
+    deadline = now + int(args.deadline_hours * 3600)
     up = lambda x: x * (10_000 + SLIPPAGE_BPS) // 10_000 + 1
     down = lambda x: x * (10_000 - SLIPPAGE_BPS) // 10_000
     txs = []
@@ -631,7 +631,7 @@ def build_tx(args):
         for token, amt, name, dec in ((IMDUSD, m0, "imdUSD", 1e18), (USDC, m1, "USDC", 1e6)):
             bal = words(call(token, enc("balanceOf", owner), block))[0]
             if bal < amt:
-                print(f"note: {owner} holds {bal / dec:,.2f} {name} and this needs up to {amt / dec:,.2f}: the deposit will revert until it is funded")
+                print(f"note: {owner} holds {bal / dec:,.2f} {name} and this needs up to {amt / dec:,.2f}: the deposit will revert until it is funded", file=sys.stderr)
         txs += approvals(owner, {IMDUSD: m0, USDC: m1}, block, now)
         if args.action == "mint":
             p0 = cast("abi-encode", "f((address,address,uint24,int24,address),int24,int24,uint256,uint128,uint128,address,bytes)",
@@ -675,7 +675,7 @@ def build_tx(args):
         print(f"  {i}. {t['label']}\n     to {t['to']}  simulation: {s}")
     if any(s != "ok" for s in sims):
         print("  a step does not simulate cleanly: fix it (balances, amounts, range) before signing anything")
-    print(f"deadline {deadline} (30 minutes): sign within it or rebuild")
+    print(f"deadline {deadline} ({args.deadline_hours:g} h): sign within it or rebuild")
     if args.safe:
         print(f"Safe Transaction Builder batch written to {args.safe}")
     print("sign with your own wallet, e.g. for each step:  cast send <to> <data> --rpc-url <rpc> --ledger   (--json prints the data)")
@@ -705,6 +705,7 @@ def main():
     p.add_argument("--range", default="peg")
     p.add_argument("--pct", type=int, default=100, help="remove: percent of the liquidity")
     p.add_argument("--safe", help="also write a Safe Transaction Builder JSON here")
+    p.add_argument("--deadline-hours", type=float, default=0.5, help="how long the signed transaction stays valid (a Safe collecting signatures needs hours)")
     for s in sub.choices.values():
         s.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
     args = ap.parse_args()
